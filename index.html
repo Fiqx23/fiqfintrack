@@ -1232,8 +1232,21 @@
     updateCategoryDropdown();
     populateMonthFilter();
     renderApp();
+      async function aktifkanPenyimpananPersisten() {
+      if (navigator.storage && navigator.storage.persist) {
+        const sudahPersisten = await navigator.storage.persisted();
+        if (!sudahPersisten) {
+          const disetujui = await navigator.storage.persist();
+          console.log(`Izin Persistent Storage disetujui: ${disetujui}`);
+        } else {
+          console.log('Penyimpanan sudah berstatus persisten.');
+        }
+      }
+    }
+    aktifkanPenyimpananPersisten();
+    // -----------------------------------------------------
   </script>
-  
+
   <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
