@@ -1111,56 +1111,59 @@
       const labels = Object.keys(categoryTotals);
       const data = Object.values(categoryTotals);
 
+// Pastikan array warna di-clone secara bersih
       const backgroundColors = labels.map((cat, idx) => 
         CATEGORY_COLORS[cat] || FALLBACK_PALETTE[idx % FALLBACK_PALETTE.length]
       );
 
+      // Hancurkan instance lama agar Chart.js di mobile selalu menggambar ulang warna secara presisi
       if (chartInstance) {
-        chartInstance.data.labels = labels;
-        chartInstance.data.datasets[0].data = data;
-        chartInstance.data.datasets[0].backgroundColor = backgroundColors;
-        chartInstance.update();
-      } else {
-        const ctx = chartCanvas.getContext('2d');
-        chartInstance = new Chart(ctx, {
-          type: 'doughnut',
-          data: {
-            labels: labels,
-            datasets: [{
-              data: data,
-              backgroundColor: backgroundColors,
-              borderWidth: 2,
-              borderColor: '#ffffff',
-            }]
+        chartInstance.destroy();
+        chartInstance = null;
+      }
+
+      const ctx = chartCanvas.getContext('2d');
+      chartInstance = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: [...labels],
+          datasets: [{
+            data: [...data],
+            backgroundColor: [...backgroundColors],
+            borderWidth: 2,
+            borderColor: '#ffffff',
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: {
+            duration: 400 // Animasi cepat agar responsif di HP
           },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-              legend: {
-                position: 'bottom',
-                labels: {
-                  boxWidth: 12,
-                  font: {
-                    family: "'Plus Jakarta Sans', sans-serif",
-                    size: 11
-                  },
-                  padding: 10
-                }
-              },
-              tooltip: {
-                callbacks: {
-                  label: function(context) {
-                    const val = context.raw || 0;
-                    return ` ${context.label}: ${formatIDR(val)}`;
-                  }
-                }
+          plugins: {
+            legend: {
+              position: 'bottom',
+              labels: {
+                boxWidth: 12,
+                font: {
+                  family: "'Plus Jakarta Sans', sans-serif",
+                  size: 11
+                },
+                padding: 10
               }
             },
-            cutout: '65%'
-          }
-        });
-      }
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  const val = context.raw || 0;
+                  return ` ${context.label}: ${formatIDR(val)}`;
+                }
+              }
+            }
+          },
+          cutout: '65%'
+        }
+      });
     }
 
     // Populasi Dropdown Filter Bulan & Tahun
