@@ -32,6 +32,8 @@ jobs:
           rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='www' ./ www/
           npx cap init "Fiq-FinTrack" "com.fiq.fintrack" --web-dir www
           npx cap add android
+          echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7' }" >> android/app/build.gradle
+          echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8' }" >> android/app/build.gradle
 
       - name: Kompilasi APK (Assemble Debug)
         run: |
