@@ -7,7 +7,7 @@
   <meta http-equiv="Expires" content="0">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Fiq-FinTrack Pro - Manajer Keuangan Terpadu</title>
-  <link id="manifest-placeholder" rel="manifest">
+  <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#4f46e5">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -7053,31 +7053,21 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
     });
     // ---------- PWA SETUP ----------
     function initPWA() {
-      const manifest = {
-        name: "Fiq-FinTrack Pro",
-        short_name: "FinTrack",
-        description: "Manajer Keuangan, Saldo, Anggaran & Catatan Hutang",
-        start_url: "./fintrack.html",
-        display: "standalone",
-        background_color: "#0f172a",
-        theme_color: "#4f46e5",
-        icons: [{
-          src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💳</text></svg>",
-          sizes: "192x192 512x512",
-          type: "image/svg+xml"
-        }]
-      };
-      const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
-      document.getElementById('manifest-placeholder').setAttribute('href', URL.createObjectURL(blob));
+      // Register offline support only for the GitHub Pages deployment.
+      // The Android APK uses bundled assets and should not register this worker.
+      const isFinTrackPages =
+        location.hostname.endsWith('github.io') &&
+        location.pathname.startsWith('/fiqfintrack/');
 
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(registrations => {
-          for (const registration of registrations) {
-            registration.unregister();
-            console.log('[SYNC DEBUG] Unregistered service worker to prevent stale caching.');
-          }
-        }).catch(() => {});
-      }
+      if (!isFinTrackPages || !('serviceWorker' in navigator)) return;
+
+      navigator.serviceWorker.register('./sw.js')
+        .then((registration) => {
+          console.log('[PWA] Offline worker registered:', registration.scope);
+        })
+        .catch((error) => {
+          console.warn('[PWA] Offline worker registration failed:', error);
+        });
     }
 
     // ---------- MASTER RENDER ----------
