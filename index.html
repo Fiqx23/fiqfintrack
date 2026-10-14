@@ -7057,7 +7057,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
       // The Android APK uses bundled assets and should not register this worker.
       const isFinTrackPages =
         location.hostname.endsWith('github.io') &&
-        location.pathname.startsWith('/fiqfintrack/');
+        location.pathname !== '/';
 
       if (!isFinTrackPages || !('serviceWorker' in navigator)) return;
 
