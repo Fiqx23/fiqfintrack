@@ -22,12 +22,97 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Paketkan File Web ke Wadah WebView
+      - name: Paketkan Aset Offline ke Wadah WebView
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets sharp
-          mkdir -p www assets
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets sharp tailwindcss@3.4.17 chart.js@4 @supabase/supabase-js@2
+          mkdir -p www assets www/vendor
           rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='www' --exclude='assets' ./ www/
+
+          # Build Tailwind locally for the packaged APK only.
+          cat > tailwind.config.cjs <<'EOF'
+          module.exports = {
+            content: ['./www/index.html'],
+            darkMode: 'class',
+            theme: {
+              extend: {
+                fontFamily: {
+                  sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+                },
+                colors: {
+                  primary: {
+                    50: '#eef2ff',
+                    100: '#e0e7ff',
+                    500: '#6366f1',
+                    600: '#4f46e5',
+                    700: '#4338ca',
+                  },
+                },
+              },
+            },
+          };
+          EOF
+          cat > tailwind.input.css <<'EOF'
+          @tailwind base;
+          @tailwind components;
+          @tailwind utilities;
+          EOF
+          npx tailwindcss -c ./tailwind.config.cjs -i ./tailwind.input.css -o ./www/tailwind.css --minify
+
+          # Bundle browser libraries locally so first launch does not need a CDN.
+          cp node_modules/chart.js/dist/chart.umd.js www/vendor/chart.umd.js
+          test -f node_modules/@supabase/supabase-js/dist/umd/supabase.js
+          cp node_modules/@supabase/supabase-js/dist/umd/supabase.js www/vendor/supabase.js
+
+          # Patch only the APK copy. The repository index.html remains unchanged for GitHub Pages.
+          node <<'NODE'
+          const fs = require('fs');
+          const path = 'www/index.html';
+          let html = fs.readFileSync(path, 'utf8');
+
+          const startMarker = '  <!-- Tailwind CSS CDN -->';
+          const endMarker = '  <!-- Google Font: Plus Jakarta Sans -->';
+          const start = html.indexOf(startMarker);
+          const end = html.indexOf(endMarker, start);
+          if (start === -1 || end === -1 || end <= start) {
+            throw new Error('Blok CDN yang diharapkan tidak ditemukan. APK build dihentikan agar HTML tidak dipatch secara keliru.');
+          }
+
+          const localAssets = [
+            '  <!-- Tailwind CSS compiled locally for offline APK -->',
+            '  <link rel="stylesheet" href="./tailwind.css">',
+            '  <!-- Chart.js bundled locally for offline APK -->',
+            '  <script src="./vendor/chart.umd.js"></script>',
+            '  <!-- Supabase JS bundled locally for offline SDK initialization -->',
+            '  <script src="./vendor/supabase.js"></script>',
+            '',
+          ].join('\n');
+
+          html = html.slice(0, start) + localAssets + html.slice(end);
+
+          // Remove Google Fonts network requests from the APK copy; CSS falls back to system sans-serif offline.
+          html = html.replace('  <link rel="preconnect" href="https://fonts.googleapis.com">\n', '');
+          html = html.replace('  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n', '');
+          html = html.replace('  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">\n', '');
+
+          const forbidden = [
+            'https://cdn.tailwindcss.com',
+            'https://cdn.jsdelivr.net/npm/chart.js',
+            'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
+            'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans',
+          ];
+          for (const url of forbidden) {
+            if (html.includes(url)) throw new Error('Ketergantungan CDN masih tersisa di APK: ' + url);
+          }
+          for (const file of ['www/tailwind.css', 'www/vendor/chart.umd.js', 'www/vendor/supabase.js']) {
+            if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+              throw new Error('Aset offline tidak ditemukan atau kosong: ' + file);
+            }
+          }
+          fs.writeFileSync(path, html);
+          console.log('Aset offline APK siap; sumber index.html repository tidak diubah.');
+          NODE
+
           node -e "require('sharp')('icon-512.png').resize(1024, 1024).png().toFile('assets/icon.png').then(() => console.log('Sumber ikon Android dibuat dari icon-512.png'))"
           npx cap init "Fiq-FinTrack" "com.fiq.fintrack" --web-dir www
           npx cap add android
