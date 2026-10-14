@@ -11,10 +11,29 @@ const PRECACHE_URLS = [
   './icon-512.png'
 ];
 
+// Cache the remote libraries used during initial rendering. Failures here must
+// not prevent the app shell from installing; the normal online load can retry.
+const EXTERNAL_ASSETS = [
+  'https://cdn.tailwindcss.com',
+  'https://cdn.jsdelivr.net/npm/chart.js',
+  'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
+  'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap'
+];
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(SHELL_CACHE)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
+      .then(async (cache) => {
+        await cache.addAll(PRECACHE_URLS);
+
+        const runtimeCache = await caches.open(RUNTIME_CACHE);
+        await Promise.allSettled(EXTERNAL_ASSETS.map(async (url) => {
+          const response = await fetch(url, { mode: 'no-cors' });
+          if (response && (response.ok || response.type === 'opaque')) {
+            await runtimeCache.put(url, response);
+          }
+        }));
+      })
       .then(() => self.skipWaiting())
   );
 });
