@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v2.4';
+const CACHE_VERSION = 'v2.5';
 const SHELL_CACHE = `fintrack-shell-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `fintrack-runtime-${CACHE_VERSION}`;
 
@@ -64,12 +64,16 @@ self.addEventListener('fetch', (event) => {
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)
-        .then((response) => {
+        .then(async (response) => {
           if (response && response.ok) {
             const copy = response.clone();
             caches.open(SHELL_CACHE).then((cache) => cache.put(request, copy)).catch(() => {});
+            return response;
           }
-          return response;
+
+          // An older installed PWA may still open the old ./fintrack.html start URL.
+          // If that path returns 404, serve the cached index app shell instead.
+          return (await caches.match(APP_SHELL)) || response;
         })
         .catch(async () => {
           return (await caches.match(request)) ||
