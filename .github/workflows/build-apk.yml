@@ -25,11 +25,13 @@ jobs:
       - name: Paketkan File Web ke Wadah WebView
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          mkdir -p www
-          rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='www' ./ www/
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets sharp
+          mkdir -p www assets
+          rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='www' --exclude='assets' ./ www/
+          node -e "require('sharp')('icon-512.png').resize(1024, 1024).png().toFile('assets/icon.png').then(() => console.log('Sumber ikon Android dibuat dari icon-512.png'))"
           npx cap init "Fiq-FinTrack" "com.fiq.fintrack" --web-dir www
           npx cap add android
+          npx capacitor-assets generate --android --iconBackgroundColor '#4f46e5' --splashBackgroundColor '#f8fafc'
           echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7' }" >> android/app/build.gradle
           echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8' }" >> android/app/build.gradle
 
