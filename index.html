@@ -3734,8 +3734,94 @@
         }
       },
 
-      // API Inti Unified Push: Push Pending Events untuk Seluruh Entitas (Phase 4F)
-            // Push pending starting balances using the verified public.starting_balances schema.
+      // Sync independently-added wallets without requiring a transaction reference.
+      async pushPendingWallets(client, currentUser) {
+        const pendingEvents = (await ChangeTracker.getPending('wallets') || [])
+          .filter(evt => ['create', 'update', 'delete'].includes(evt.operation));
+        let processed = 0;
+        let failed = 0;
+        const errors = [];
+
+        for (const event of pendingEvents) {
+          try {
+            const wallet = await DAL.get('wallets', event.entityId);
+            if (!wallet && event.operation !== 'delete') {
+              await ChangeTracker.markSynced(event.id);
+              continue;
+            }
+
+            if (event.operation === 'delete') {
+              const { error } = await client.from(this.TABLE_WALLETS)
+                .update({
+                  deleted_at: (wallet && wallet.deletedAt) || new Date().toISOString(),
+                  updated_at: (wallet && wallet.updatedAt) || new Date().toISOString(),
+                  device_id: (wallet && wallet.deviceId) || getDeviceId()
+                })
+                .eq('id', event.entityId)
+                .eq('user_id', currentUser.id);
+              if (error) throw error;
+              await ChangeTracker.markSynced(event.id);
+              processed++;
+              continue;
+            }
+
+            const payload = {
+              id: wallet.id,
+              user_id: currentUser.id,
+              name: wallet.name,
+              created_at: wallet.createdAt || new Date().toISOString(),
+              updated_at: wallet.updatedAt || new Date().toISOString(),
+              deleted_at: wallet.deletedAt || null,
+              device_id: wallet.deviceId || getDeviceId()
+            };
+            const { error } = await client.from(this.TABLE_WALLETS).insert(payload);
+            if (error) {
+              const duplicate = error.code === '23505' || (error.message || '').toLowerCase().includes('duplicate key');
+              if (!duplicate) throw error;
+
+              // Idempotent replay by id, or reconcile with an active wallet of the same name.
+              const { data: existingById, error: idErr } = await client.from(this.TABLE_WALLETS)
+                .select('id')
+                .eq('id', wallet.id)
+                .eq('user_id', currentUser.id)
+                .maybeSingle();
+              if (idErr) throw idErr;
+
+              if (existingById) {
+                const { error: updErr } = await client.from(this.TABLE_WALLETS)
+                  .update({
+                    name: payload.name,
+                    updated_at: payload.updated_at,
+                    deleted_at: payload.deleted_at,
+                    device_id: payload.device_id
+                  })
+                  .eq('id', wallet.id)
+                  .eq('user_id', currentUser.id);
+                if (updErr) throw updErr;
+              } else {
+                const { data: byName, error: nameErr } = await client.from(this.TABLE_WALLETS)
+                  .select('id')
+                  .eq('user_id', currentUser.id)
+                  .eq('name', wallet.name)
+                  .is('deleted_at', null)
+                  .maybeSingle();
+                if (nameErr || !byName) throw error;
+                wallet.cloudId = byName.id;
+                await DAL.put('wallets', wallet);
+              }
+            }
+            await ChangeTracker.markSynced(event.id);
+            processed++;
+          } catch (err) {
+            await ChangeTracker.markFailed(event.id, err.message || String(err));
+            failed++;
+            errors.push({ id: event.entityId, entity: 'wallets', error: err.message || String(err) });
+          }
+        }
+        return { success: failed === 0, processed, failed, errors };
+      },
+
+      // Push pending starting balances using the verified public.starting_balances schema.
       async pushPendingStartingBalances(client, currentUser) {
         const pendingEvents = (await ChangeTracker.getPending('startingBalances') || [])
           .filter(evt => ['create', 'update', 'delete'].includes(evt.operation));
@@ -3937,6 +4023,12 @@ async pushPendingAll() {
           totalProcessed += (catRes.processed || 0);
           totalFailed += (catRes.failed || 0);
           if (catRes.errors) totalErrors.push(...catRes.errors);
+
+          // Push wallets independently before starting balances.
+          const wRes = await this.pushPendingWallets(client, currentUser);
+          totalProcessed += (wRes.processed || 0);
+          totalFailed += (wRes.failed || 0);
+          if (wRes.errors) totalErrors.push(...wRes.errors);
 
           // Push saldo awal setelah kategori/dompet: tabel memerlukan wallet_id yang sudah tersinkron.
           const sbRes = await this.pushPendingStartingBalances(client, currentUser);
@@ -4276,6 +4368,53 @@ async pushPendingAll() {
           }
         } else {
           console.log('[SyncManager] [Pull] Tidak ada transaksi di cloud untuk user ini.');
+        }
+
+        // Pull all user wallets/categories, not only those referenced by transactions.
+        try {
+          const { data: cloudWallets, error: walletErr } = await client.from(this.TABLE_WALLETS)
+            .select('*').eq('user_id', currentUser.id);
+          if (walletErr) throw walletErr;
+          for (const w of (cloudWallets || [])) {
+            const local = await DAL.get('wallets', w.id);
+            const queue = await DAL.getAll('changeQueue');
+            const hasPending = (queue || []).some(q =>
+              (q.entity === 'wallets' || q.entity === 'wallet') &&
+              String(q.entityId) === String(w.id) && q.status !== 'synced'
+            );
+            if (local && hasPending && new Date(local.updatedAt || 0).getTime() >= new Date(w.updated_at || 0).getTime()) continue;
+            await DAL.put('wallets', {
+              id: w.id, walletId: w.id, name: w.name,
+              createdAt: w.created_at || new Date().toISOString(),
+              updatedAt: w.updated_at || new Date().toISOString(),
+              deletedAt: w.deleted_at || null, deviceId: w.device_id || null
+            });
+          }
+        } catch (walletPullErr) {
+          console.warn('[SyncManager] [Pull] Gagal menarik dompet mandiri:', walletPullErr.message);
+        }
+
+        try {
+          const { data: cloudCategories, error: categoryErr } = await client.from(this.TABLE_CATEGORIES)
+            .select('*').eq('user_id', currentUser.id);
+          if (categoryErr) throw categoryErr;
+          for (const c of (cloudCategories || [])) {
+            const local = await DAL.get('categories', c.id);
+            const queue = await DAL.getAll('changeQueue');
+            const hasPending = (queue || []).some(q =>
+              (q.entity === 'categories' || q.entity === 'category') &&
+              String(q.entityId) === String(c.id) && q.status !== 'synced'
+            );
+            if (local && hasPending && new Date(local.updatedAt || 0).getTime() >= new Date(c.updated_at || 0).getTime()) continue;
+            await DAL.put('categories', {
+              id: c.id, categoryId: c.id, name: c.name, type: c.type,
+              createdAt: c.created_at || new Date().toISOString(),
+              updatedAt: c.updated_at || new Date().toISOString(),
+              deletedAt: c.deleted_at || null, deviceId: c.device_id || null
+            });
+          }
+        } catch (categoryPullErr) {
+          console.warn('[SyncManager] [Pull] Gagal menarik kategori mandiri:', categoryPullErr.message);
         }
 
         // 8. PULL BUDGETS (with Category Dependencies)
