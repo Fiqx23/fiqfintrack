@@ -3345,6 +3345,86 @@
         return { success: failedCount === 0, processed: processedCount, failed: failedCount, errors };
       },
 
+      // Proses kategori lokal secara mandiri; transaksi tidak wajib dibuat lebih dulu.
+      async pushPendingCategories(client, currentUser) {
+        const pendingEvents = (await ChangeTracker.getPending('categories') || [])
+          .filter(evt => ['create', 'update', 'delete'].includes(evt.operation));
+        let processed = 0;
+        let failed = 0;
+        const errors = [];
+
+        for (const event of pendingEvents) {
+          try {
+            const cat = await DAL.get('categories', event.entityId);
+            if (!cat && event.operation !== 'delete') {
+              await ChangeTracker.markSynced(event.id);
+              continue;
+            }
+
+            // Gunakan helper yang sama seperti transaksi/anggaran untuk menjaga aturan duplikasi.
+            if (event.operation === 'delete') {
+              const { error } = await client.from(this.TABLE_CATEGORIES)
+                .update({
+                  deleted_at: (cat && cat.deletedAt) || new Date().toISOString(),
+                  updated_at: (cat && cat.updatedAt) || new Date().toISOString(),
+                  device_id: (cat && cat.deviceId) || getDeviceId()
+                })
+                .eq('id', event.entityId)
+                .eq('user_id', currentUser.id);
+
+              if (error) throw error;
+              await ChangeTracker.markSynced(event.id);
+              processed++;
+              continue;
+            }
+
+            const result = await this.ensureCategorySynced(
+              client, cat.id, cat.name, cat.type, currentUser.id, cat.deviceId || getDeviceId()
+            );
+            if (!result.success) throw new Error(result.error || 'Kategori gagal disinkronkan.');
+
+            // Saat nama sama tetapi UUID berbeda, cloud dapat mengembalikan ID yang sudah ada.
+            // Simpan mapping cloud ID agar penggunaan lokal berikutnya tidak memakai ID yang salah.
+            if (result.id && result.id !== cat.id) {
+              cat.cloudId = result.id;
+              await DAL.put('categories', cat);
+            }
+            await ChangeTracker.markSynced(event.id);
+            processed++;
+          } catch (err) {
+            await ChangeTracker.markFailed(event.id, err.message || String(err));
+            failed++;
+            errors.push({ id: event.entityId, entity: 'categories', error: err.message || String(err) });
+          }
+        }
+
+        return { success: failed === 0, processed, failed, errors };
+      },
+
+      // Saldo awal saat ini hanya tersimpan lokal: repo tidak mendefinisikan tabel cloud khusus.
+      // Jangan mengirim payload ke tabel yang belum terverifikasi karena dapat menghasilkan sync palsu.
+      async reportPendingStartingBalances() {
+        const pendingEvents = (await ChangeTracker.getPending('startingBalances') || [])
+          .filter(evt => ['create', 'update', 'delete'].includes(evt.operation));
+        if (!pendingEvents.length) return { success: true, processed: 0, failed: 0, errors: [] };
+
+        const message = 'Saldo awal masih menunggu dukungan skema cloud; data tetap aman tersimpan lokal.';
+        for (const event of pendingEvents) {
+          await ChangeTracker.markFailed(event.id, message);
+        }
+        return {
+          success: false,
+          processed: 0,
+          failed: pendingEvents.length,
+          errors: pendingEvents.map(event => ({
+            id: event.entityId,
+            entity: 'startingBalances',
+            error: message,
+            category: 'unsupported_cloud_schema'
+          }))
+        };
+      },
+
       // API Utama: SyncManager.pushPendingCreates() (Unified Push untuk seluruh entitas)
       async pushPendingCreates() {
         return await this.pushPendingAll();
@@ -3716,7 +3796,18 @@
           totalFailed += (txRes.failed || 0);
           if (txRes.errors) totalErrors.push(...txRes.errors);
 
-          // 2. Push Budgets (includes category dependency resolution)
+          // 2. Push standalone categories first (not only transaction/budget dependencies)
+          const catRes = await this.pushPendingCategories(client, currentUser);
+          totalProcessed += (catRes.processed || 0);
+          totalFailed += (catRes.failed || 0);
+          if (catRes.errors) totalErrors.push(...catRes.errors);
+
+          // Saldo awal belum memiliki tabel cloud yang terverifikasi; jangan hilangkan pending diam-diam.
+          const sbRes = await this.reportPendingStartingBalances();
+          totalFailed += (sbRes.failed || 0);
+          if (sbRes.errors) totalErrors.push(...sbRes.errors);
+
+          // 3. Push Budgets (includes category dependency resolution)
           const bRes = await this.pushPendingBudgets(client, currentUser);
           totalProcessed += (bRes.processed || 0);
           totalFailed += (bRes.failed || 0);
@@ -3775,7 +3866,7 @@
       async getPendingCount() {
         try {
           const allPending = await ChangeTracker.getPending();
-          const validEntities = new Set(['transactions', 'transaction', 'goals', 'debts', 'budgets', 'categories', 'category', 'wallets', 'wallet']);
+          const validEntities = new Set(['transactions', 'transaction', 'goals', 'debts', 'budgets', 'categories', 'category', 'wallets', 'wallet', 'startingBalances']);
           const pendingOps = (allPending || []).filter(evt => 
             validEntities.has(evt.entity) &&
             (evt.operation === 'create' || evt.operation === 'update' || evt.operation === 'delete')
