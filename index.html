@@ -3847,7 +3847,17 @@
               throw new Error(`Dompet '${sb.walletName || sb.walletId || 'tidak diketahui'}' belum tersedia.`);
             }
 
-            const walletId = wallet ? wallet.id : (sb && sb.walletId);
+            // Pastikan dompet benar-benar tersedia di cloud, termasuk dompet default tanpa antrean sendiri.
+            let walletId = wallet ? wallet.id : (sb && sb.walletId);
+            if (event.operation !== 'delete') {
+              const walletSync = await this.ensureWalletSynced(
+                client, wallet.id, wallet.name, currentUser.id, wallet.deviceId || getDeviceId()
+              );
+              if (!walletSync.success || !walletSync.id) {
+                throw new Error(walletSync.error || 'Dompet gagal disinkronkan sebelum saldo awal.');
+              }
+              walletId = walletSync.id;
+            }
             const table = 'starting_balances';
             if (event.operation === 'delete') {
               const { data, error } = await client.from(table)
@@ -3895,12 +3905,25 @@
               if (!data || data.length === 0) {
                 const { error: insertError } = await client.from(table).insert(payload);
                 if (insertError) {
+                  const isDuplicate = insertError.code === '23505' || (insertError.message || '').toLowerCase().includes('duplicate key');
+                  if (!isDuplicate) throw insertError;
                   const { data: existing, error: lookupError } = await client.from(table)
                     .select('id')
                     .eq('id', sb.id)
                     .eq('user_id', currentUser.id)
                     .maybeSingle();
                   if (lookupError || !existing) throw insertError;
+                  const { error: updateError } = await client.from(table)
+                    .update({
+                      wallet_id: payload.wallet_id,
+                      amount: payload.amount,
+                      updated_at: payload.updated_at,
+                      deleted_at: payload.deleted_at,
+                      device_id: payload.device_id
+                    })
+                    .eq('id', sb.id)
+                    .eq('user_id', currentUser.id);
+                  if (updateError) throw updateError;
                 }
               }
             } else {
