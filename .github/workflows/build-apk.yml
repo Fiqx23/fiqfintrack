@@ -25,7 +25,7 @@ jobs:
       - name: Paketkan Aset Offline ke Wadah WebView
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets sharp tailwindcss@3.4.17 chart.js@4 @supabase/supabase-js@2
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/filesystem @capacitor/share @capacitor/assets sharp esbuild tailwindcss@3.4.17 chart.js@4 @supabase/supabase-js@2
           mkdir -p www assets www/vendor
           rsync -av --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='www' --exclude='assets' ./ www/
 
@@ -64,6 +64,40 @@ jobs:
           test -f node_modules/@supabase/supabase-js/dist/umd/supabase.js
           cp node_modules/@supabase/supabase-js/dist/umd/supabase.js www/vendor/supabase.js
 
+          # Build APK-only native export bridge. The repository index.html stays untouched.
+          cat > apk-native-export.js <<'EOF'
+          import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+          import { Share } from '@capacitor/share';
+
+          window.FinTrackNativeExport = {
+            async saveAndShare(content, fileName) {
+              const saved = await Filesystem.writeFile({
+                path: fileName,
+                data: content,
+                directory: Directory.Cache,
+                encoding: Encoding.UTF8,
+              });
+              if (!saved || !saved.uri) {
+                throw new Error('Filesystem tidak mengembalikan lokasi file.');
+              }
+
+              try {
+                await Share.share({
+                  title: 'Ekspor FinTrack',
+                  text: 'Pilih tujuan untuk menyimpan atau membagikan file ekspor FinTrack.',
+                  files: [saved.uri],
+                  dialogTitle: 'Simpan atau bagikan file FinTrack',
+                });
+                return { uri: saved.uri, shared: true };
+              } catch (error) {
+                console.error('[FinTrack Export] File dibuat, tetapi menu berbagi gagal dibuka:', error);
+                return { uri: saved.uri, shared: false };
+              }
+            },
+          };
+          EOF
+          npx esbuild apk-native-export.js --bundle --format=iife --platform=browser --target=es2020 --outfile=www/vendor/apk-native-export.js
+
           # Patch only the APK copy. The repository index.html remains unchanged for GitHub Pages.
           node <<'NODE'
           const fs = require('fs');
@@ -85,6 +119,8 @@ jobs:
             '  <script src="./vendor/chart.umd.js"></script>',
             '  <!-- Supabase JS bundled locally for offline SDK initialization -->',
             '  <script src="./vendor/supabase.js"></script>',
+            '  <!-- APK-only native JSON/CSV export bridge -->',
+            '  <script src="./vendor/apk-native-export.js"></script>',
             '',
           ].join('\n');
 
@@ -95,6 +131,15 @@ jobs:
           html = html.replace('  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n', '');
           html = html.replace('  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">\n', '');
 
+          const nativeExportPatch = "<!-- APK_NATIVE_EXPORT_PATCH -->\n<script>\n(() => {\n  const isNativeAndroid = () => Boolean(window.Capacitor && typeof window.Capacitor.getPlatform === 'function' && window.Capacitor.getPlatform() === 'android');\n  const originalCsvExport = window.exportTransactionsToCSV;\n  const originalJsonBackup = window.backupTransactionsJSON;\n\n  window.exportTransactionsToCSV = async function() {\n    if (!isNativeAndroid()) return originalCsvExport.apply(this, arguments);\n    try {\n      if (!Array.isArray(transactions) || transactions.length === 0) {\n        showToast('Belum ada transaksi untuk diekspor!', 'warning');\n        return;\n      }\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const data = getTimeFilteredTransactions().filter(t => !t.deletedAt);\n      const headers = ['ID', 'Tanggal', 'Jenis', 'Kategori', 'Sumber/Tujuan Dompet', 'Nama', 'Nominal'];\n      const rows = data.map(t => [\n        t.id,\n        formatDate(t.date),\n        t.type,\n        t.category || '-',\n        t.type === 'transfer' ? String(t.walletFrom || '') + ' -> ' + String(t.walletTo || '') : (t.wallet || 'Tunai (cash)'),\n        '\"' + (t.name || '').replace(/\"/g, '\"\"') + '\"',\n        t.amount\n      ].join(';'));\n      const csv = '\\uFEFF' + [headers.join(';'), ...rows].join('\\r\\n');\n      const fileName = 'FinTrack_Export_' + new Date().toISOString().slice(0, 10) + '.csv';\n      const result = await window.FinTrackNativeExport.saveAndShare(csv, fileName, 'text/csv');\n      if (result.shared) showToast('CSV siap dibagikan. Pilih tujuan untuk menyimpan file.', 'success');\n      else showToast('File CSV dibuat sementara, tetapi menu berbagi gagal dibuka.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] CSV gagal:', error);\n      showToast('Ekspor CSV gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n\n  window.backupTransactionsJSON = async function() {\n    if (!isNativeAndroid()) return originalJsonBackup.apply(this, arguments);\n    try {\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const payload = {\n        app: 'Fiq-FinTrack Pro',\n        version: '3.2',\n        schemaVersion: 2,\n        deviceId: getDeviceId(),\n        exportedAt: new Date().toISOString(),\n        transactions: transactions,\n        wallets: customWallets,\n        categories: customCategories,\n        startingBalances: startingBalances,\n        budgets: budgets,\n        debts: debts,\n        goals: goals,\n        presets: presets\n      };\n      const json = JSON.stringify(payload, null, 2);\n      const fileName = 'FinTrack_Full_Backup_' + new Date().toISOString().slice(0, 10) + '.json';\n      const result = await window.FinTrackNativeExport.saveAndShare(json, fileName, 'application/json');\n      if (result.shared) showToast('Backup JSON siap dibagikan. Pilih tujuan untuk menyimpan file.', 'success');\n      else showToast('File backup JSON dibuat sementara, tetapi menu berbagi gagal dibuka.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] JSON backup gagal:', error);\n      showToast('Backup JSON gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n})();\n</script>";
+          if (!html.includes('function exportTransactionsToCSV()') || !html.includes('function backupTransactionsJSON()')) {
+            throw new Error('Fungsi ekspor yang diharapkan tidak ditemukan; APK build dihentikan agar patch tidak diterapkan ke kode yang berbeda.');
+          }
+          if (html.includes('<!-- APK_NATIVE_EXPORT_PATCH -->')) {
+            throw new Error('Patch ekspor native sudah ada di sumber APK; hentikan build untuk mencegah injeksi ganda.');
+          }
+          if (!html.includes('</body>')) throw new Error('Tag penutup body tidak ditemukan untuk patch ekspor native.');
+          html = html.replace('</body>', nativeExportPatch + '\n</body>');
           const forbidden = [
             'https://cdn.tailwindcss.com',
             'https://cdn.jsdelivr.net/npm/chart.js',
@@ -104,7 +149,7 @@ jobs:
           for (const url of forbidden) {
             if (html.includes(url)) throw new Error('Ketergantungan CDN masih tersisa di APK: ' + url);
           }
-          for (const file of ['www/tailwind.css', 'www/vendor/chart.umd.js', 'www/vendor/supabase.js']) {
+          for (const file of ['www/tailwind.css', 'www/vendor/chart.umd.js', 'www/vendor/supabase.js', 'www/vendor/apk-native-export.js']) {
             if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
               throw new Error('Aset offline tidak ditemukan atau kosong: ' + file);
             }
@@ -116,6 +161,7 @@ jobs:
           node -e "require('sharp')('icon-512.png').resize(1024, 1024).png().toFile('assets/icon.png').then(() => console.log('Sumber ikon Android dibuat dari icon-512.png'))"
           npx cap init "Fiq-FinTrack" "com.fiq.fintrack" --web-dir www
           npx cap add android
+          npx cap sync android
           npx capacitor-assets generate --android --iconBackgroundColor '#4f46e5' --splashBackgroundColor '#f8fafc'
           echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7' }" >> android/app/build.gradle
           echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8' }" >> android/app/build.gradle
