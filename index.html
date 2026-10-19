@@ -7601,7 +7601,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
           populateDropdowns();
           populateMonthFilter();
           renderApp();
-          showToast('Data berhasil dipulihkan secara lengkap ke IndexedDB!', 'success');
+          showToast('Data berhasil dipulihkan ke penyimpanan lokal FinTrack.', 'success');
         } catch (err) {
           if (restoreStateSnapshot) {
             ({ transactions, customWallets, customCategories, startingBalances, budgets, debts, goals, presets } = restoreStateSnapshot);
