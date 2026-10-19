@@ -7248,8 +7248,9 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
       a.href = url;
       a.download = `FinTrack_Export_${new Date().toISOString().slice(0,10)}.csv`;
       a.click();
-      URL.revokeObjectURL(url);
-      showToast('Data berhasil diekspor ke CSV!', 'success');
+      // Browser download is requested, but the page cannot verify that the file was saved.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('Permintaan unduh CSV dikirim ke browser. Periksa folder unduhan; penyimpanan file tidak dapat diverifikasi aplikasi.', 'info');
     }
 
     function backupTransactionsJSON() {
@@ -7275,8 +7276,9 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
       a.href = url;
       a.download = `FinTrack_Full_Backup_${new Date().toISOString().slice(0,10)}.json`;
       a.click();
-      URL.revokeObjectURL(url);
-      showToast('Seluruh data berhasil dicadangkan!', 'success');
+      // Browser download is requested, but the page cannot verify that the file was saved.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('Permintaan unduh backup JSON dikirim ke browser. Periksa folder unduhan; penyimpanan file tidak dapat diverifikasi aplikasi.', 'info');
     }
 
     document.getElementById('input-restore-file').addEventListener('change', (e) => {
