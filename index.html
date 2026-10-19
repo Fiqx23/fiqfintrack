@@ -7261,6 +7261,113 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
             throw new Error('Format berkas tidak sesuai.');
           }
 
+          // Validasi seluruh struktur backup sebelum ada perubahan ke IndexedDB.
+          // Ini mencegah file rusak/berformat salah menghapus sebagian data aktif.
+          const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+          const validateFiniteValue = (value, label) => {
+            if (value !== undefined && value !== null && value !== '' && !Number.isFinite(Number(value))) {
+              throw new Error(`Nilai ${label} tidak valid dalam file backup.`);
+            }
+          };
+
+          if (!Array.isArray(newTx)) throw new Error('Daftar transaksi dalam backup tidak valid.');
+          if (!Array.isArray(newWallets)) throw new Error('Daftar dompet dalam backup tidak valid.');
+          if (!newCategories || !Array.isArray(newCategories.expense) || !Array.isArray(newCategories.income)) {
+            throw new Error('Struktur kategori dalam backup tidak valid.');
+          }
+          if (!isPlainObject(newStartingBalances)) throw new Error('Data saldo awal dalam backup tidak valid.');
+          if (!isPlainObject(newBudgets)) throw new Error('Data anggaran dalam backup tidak valid.');
+          if (!Array.isArray(newDebts) || !Array.isArray(newGoals) || !Array.isArray(newPresets)) {
+            throw new Error('Daftar utang, target, atau preset dalam backup tidak valid.');
+          }
+
+          newWallets.forEach((wallet, index) => {
+            if (typeof wallet === 'string') return;
+            if (!wallet || typeof wallet !== 'object' || Array.isArray(wallet)) {
+              throw new Error(`Format dompet ke-${index + 1} tidak valid.`);
+            }
+            const name = wallet.name ?? wallet.wallet;
+            if (name !== undefined && typeof name !== 'string') {
+              throw new Error(`Nama dompet ke-${index + 1} tidak valid.`);
+            }
+          });
+
+          for (const type of ['expense', 'income']) {
+            newCategories[type].forEach((category, index) => {
+              if (typeof category !== 'string') {
+                throw new Error(`Kategori ${type} ke-${index + 1} tidak valid.`);
+              }
+            });
+          }
+
+          Object.entries(newStartingBalances).forEach(([wallet, amount]) => {
+            validateFiniteValue(amount, `saldo awal untuk dompet "${wallet}"`);
+          });
+          Object.entries(newBudgets).forEach(([category, amount]) => {
+            validateFiniteValue(amount, `anggaran untuk kategori "${category}"`);
+          });
+
+          newTx.forEach((tx, index) => {
+            if (!tx || typeof tx !== 'object' || Array.isArray(tx)) {
+              throw new Error(`Transaksi ke-${index + 1} tidak valid.`);
+            }
+            if (tx.name !== undefined && tx.name !== null && typeof tx.name !== 'string') {
+              throw new Error(`Nama transaksi ke-${index + 1} tidak valid.`);
+            }
+            if (tx.date && Number.isNaN(new Date(tx.date).getTime())) {
+              throw new Error(`Tanggal transaksi ke-${index + 1} tidak valid.`);
+            }
+            if (tx.type && !['income', 'expense', 'transfer'].includes(tx.type)) {
+              throw new Error(`Jenis transaksi ke-${index + 1} tidak dikenal.`);
+            }
+            validateFiniteValue(tx.amount, `jumlah transaksi ke-${index + 1}`);
+          });
+
+          newDebts.forEach((debt, index) => {
+            if (!debt || typeof debt !== 'object' || Array.isArray(debt)) {
+              throw new Error(`Data utang ke-${index + 1} tidak valid.`);
+            }
+            if (debt.person != null && typeof debt.person !== 'string') {
+              throw new Error(`Nama pihak pada utang ke-${index + 1} tidak valid.`);
+            }
+            if (debt.notes != null && typeof debt.notes !== 'string') {
+              throw new Error(`Catatan utang ke-${index + 1} tidak valid.`);
+            }
+            validateFiniteValue(debt.amount, `jumlah utang ke-${index + 1}`);
+          });
+
+          newGoals.forEach((goal, index) => {
+            if (!goal || typeof goal !== 'object' || Array.isArray(goal)) {
+              throw new Error(`Data target ke-${index + 1} tidak valid.`);
+            }
+            if (goal.title != null && typeof goal.title !== 'string') {
+              throw new Error(`Nama target ke-${index + 1} tidak valid.`);
+            }
+            validateFiniteValue(goal.targetAmount, `target ke-${index + 1}`);
+            validateFiniteValue(goal.currentAmount, `progres target ke-${index + 1}`);
+          });
+
+          newPresets.forEach((preset, index) => {
+            if (!preset || typeof preset !== 'object' || Array.isArray(preset)) {
+              throw new Error(`Preset ke-${index + 1} tidak valid.`);
+            }
+            if (preset.name != null && typeof preset.name !== 'string') {
+              throw new Error(`Nama preset ke-${index + 1} tidak valid.`);
+            }
+            if (preset.category != null && typeof preset.category !== 'string') {
+              throw new Error(`Kategori preset ke-${index + 1} tidak valid.`);
+            }
+            validateFiniteValue(preset.amount, `jumlah preset ke-${index + 1}`);
+          });
+
+          const confirmed = window.confirm(
+            'Pemulihan backup akan MENGGANTI data lokal FinTrack saat ini (transaksi, dompet, kategori, saldo awal, anggaran, utang, target, dan preset). Pastikan file backup benar. Lanjutkan?'
+          );
+          if (!confirmed) {
+            showToast('Pemulihan backup dibatalkan. Data lokal tidak diubah.', 'info');
+            return;
+          }
+
           const deviceId = getDeviceId();
           const nowIso = new Date().toISOString();
 
