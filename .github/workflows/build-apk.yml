@@ -173,7 +173,7 @@ jobs:
             public void saveFile(PluginCall call) {
               String fileName = call.getString("fileName");
               String mimeType = call.getString("mimeType");
-              String fileContent = call.getData().getString("content");
+              String fileContent = call.getString("content");
               if (fileName == null || fileName.trim().isEmpty() || fileContent == null) {
                 call.reject("Nama file atau isi file tidak tersedia.");
                 return;
@@ -184,6 +184,7 @@ jobs:
               intent.addCategory(Intent.CATEGORY_OPENABLE);
               intent.setType(mimeType);
               intent.putExtra(Intent.EXTRA_TITLE, fileName);
+              call.getData().put("finTrackExportContent", fileContent);
               startActivityForResult(call, intent, "handleSaveResult");
             }
 
@@ -200,7 +201,11 @@ jobs:
               }
 
               Uri uri = result.getData().getData();
-              String fileContent = call.getData().getString("content");
+              String fileContent = call.getData().getString("finTrackExportContent");
+              if (fileContent == null) {
+                call.reject("Isi file ekspor tidak tersedia setelah dialog penyimpanan.");
+                return;
+              }
               try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "w")) {
                 if (output == null) throw new IllegalStateException("Android tidak dapat membuka file tujuan.");
                 output.write(fileContent.getBytes(StandardCharsets.UTF_8));
