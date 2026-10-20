@@ -66,33 +66,18 @@ jobs:
 
           # Build APK-only native export bridge. The repository index.html stays untouched.
           cat > apk-native-export.js <<'EOF'
-          import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
-          import { Share } from '@capacitor/share';
+          import { registerPlugin } from '@capacitor/core';
+
+          const FinTrackFile = registerPlugin('FinTrackFile');
 
           window.FinTrackNativeExport = {
-            async saveAndShare(content, fileName) {
-              const saved = await Filesystem.writeFile({
-                path: fileName,
-                data: content,
-                directory: Directory.Cache,
-                encoding: Encoding.UTF8,
-              });
-              if (!saved || !saved.uri) {
-                throw new Error('Filesystem tidak mengembalikan lokasi file.');
+            async saveFile(content, fileName, mimeType) {
+              const result = await FinTrackFile.saveFile({ content, fileName, mimeType });
+              if (result && result.cancelled) return { saved: false, cancelled: true };
+              if (!result || !result.saved || !result.uri) {
+                throw new Error('Android tidak mengonfirmasi penyimpanan file.');
               }
-
-              try {
-                await Share.share({
-                  title: 'Ekspor FinTrack',
-                  text: 'Pilih tujuan untuk menyimpan atau membagikan file ekspor FinTrack.',
-                  files: [saved.uri],
-                  dialogTitle: 'Simpan atau bagikan file FinTrack',
-                });
-                return { uri: saved.uri, shared: true };
-              } catch (error) {
-                console.error('[FinTrack Export] File dibuat, tetapi menu berbagi gagal dibuka:', error);
-                return { uri: saved.uri, shared: false };
-              }
+              return { saved: true, uri: result.uri };
             },
           };
           EOF
@@ -131,7 +116,7 @@ jobs:
           html = html.replace('  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n', '');
           html = html.replace('  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">\n', '');
 
-          const nativeExportPatch = "<!-- APK_NATIVE_EXPORT_PATCH -->\n<script>\n(() => {\n  const isNativeAndroid = () => Boolean(window.Capacitor && typeof window.Capacitor.getPlatform === 'function' && window.Capacitor.getPlatform() === 'android');\n  const originalCsvExport = window.exportTransactionsToCSV;\n  const originalJsonBackup = window.backupTransactionsJSON;\n\n  window.exportTransactionsToCSV = async function() {\n    if (!isNativeAndroid()) return originalCsvExport.apply(this, arguments);\n    try {\n      if (!Array.isArray(transactions) || transactions.length === 0) {\n        showToast('Belum ada transaksi untuk diekspor!', 'warning');\n        return;\n      }\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const data = getTimeFilteredTransactions().filter(t => !t.deletedAt);\n      const headers = ['ID', 'Tanggal', 'Jenis', 'Kategori', 'Sumber/Tujuan Dompet', 'Nama', 'Nominal'];\n      const rows = data.map(t => [\n        t.id,\n        formatDate(t.date),\n        t.type,\n        t.category || '-',\n        t.type === 'transfer' ? String(t.walletFrom || '') + ' -> ' + String(t.walletTo || '') : (t.wallet || 'Tunai (cash)'),\n        '\"' + (t.name || '').replace(/\"/g, '\"\"') + '\"',\n        t.amount\n      ].join(';'));\n      const csv = '\\uFEFF' + [headers.join(';'), ...rows].join('\\r\\n');\n      const fileName = 'FinTrack_Export_' + new Date().toISOString().slice(0, 10) + '.csv';\n      const result = await window.FinTrackNativeExport.saveAndShare(csv, fileName, 'text/csv');\n      if (result.shared) showToast('CSV siap dibagikan. Pilih tujuan untuk menyimpan file.', 'success');\n      else showToast('File CSV dibuat sementara, tetapi menu berbagi gagal dibuka.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] CSV gagal:', error);\n      showToast('Ekspor CSV gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n\n  window.backupTransactionsJSON = async function() {\n    if (!isNativeAndroid()) return originalJsonBackup.apply(this, arguments);\n    try {\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const payload = {\n        app: 'Fiq-FinTrack Pro',\n        version: '3.2',\n        schemaVersion: 2,\n        deviceId: getDeviceId(),\n        exportedAt: new Date().toISOString(),\n        transactions: transactions,\n        wallets: customWallets,\n        categories: customCategories,\n        startingBalances: startingBalances,\n        budgets: budgets,\n        debts: debts,\n        goals: goals,\n        presets: presets\n      };\n      const json = JSON.stringify(payload, null, 2);\n      const fileName = 'FinTrack_Full_Backup_' + new Date().toISOString().slice(0, 10) + '.json';\n      const result = await window.FinTrackNativeExport.saveAndShare(json, fileName, 'application/json');\n      if (result.shared) showToast('Backup JSON siap dibagikan. Pilih tujuan untuk menyimpan file.', 'success');\n      else showToast('File backup JSON dibuat sementara, tetapi menu berbagi gagal dibuka.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] JSON backup gagal:', error);\n      showToast('Backup JSON gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n})();\n</script>";
+          const nativeExportPatch = "<!-- APK_NATIVE_EXPORT_PATCH -->\n<script>\n(() => {\n  const isNativeAndroid = () => Boolean(window.Capacitor && typeof window.Capacitor.getPlatform === 'function' && window.Capacitor.getPlatform() === 'android');\n  const originalCsvExport = window.exportTransactionsToCSV;\n  const originalJsonBackup = window.backupTransactionsJSON;\n\n  window.exportTransactionsToCSV = async function() {\n    if (!isNativeAndroid()) return originalCsvExport.apply(this, arguments);\n    try {\n      if (!Array.isArray(transactions) || transactions.length === 0) {\n        showToast('Belum ada transaksi untuk diekspor!', 'warning');\n        return;\n      }\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const data = getTimeFilteredTransactions().filter(t => !t.deletedAt);\n      const headers = ['ID', 'Tanggal', 'Jenis', 'Kategori', 'Sumber/Tujuan Dompet', 'Nama', 'Nominal'];\n      const rows = data.map(t => [\n        t.id,\n        formatDate(t.date),\n        t.type,\n        t.category || '-',\n        t.type === 'transfer' ? String(t.walletFrom || '') + ' -> ' + String(t.walletTo || '') : (t.wallet || 'Tunai (cash)'),\n        '\"' + (t.name || '').replace(/\"/g, '\"\"') + '\"',\n        t.amount\n      ].join(';'));\n      const csv = '\\uFEFF' + [headers.join(';'), ...rows].join('\\r\\n');\n      const fileName = 'FinTrack_Export_' + new Date().toISOString().slice(0, 10) + '.csv';\n      const result = await window.FinTrackNativeExport.saveFile(csv, fileName, 'text/csv');\n      if (result.saved) showToast('CSV tersimpan di lokasi yang dipilih.', 'success');\n      else if (result.cancelled) showToast('Penyimpanan CSV dibatalkan. File belum disimpan.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] CSV gagal:', error);\n      showToast('Ekspor CSV gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n\n  window.backupTransactionsJSON = async function() {\n    if (!isNativeAndroid()) return originalJsonBackup.apply(this, arguments);\n    try {\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const payload = {\n        app: 'Fiq-FinTrack Pro',\n        version: '3.2',\n        schemaVersion: 2,\n        deviceId: getDeviceId(),\n        exportedAt: new Date().toISOString(),\n        transactions: transactions,\n        wallets: customWallets,\n        categories: customCategories,\n        startingBalances: startingBalances,\n        budgets: budgets,\n        debts: debts,\n        goals: goals,\n        presets: presets\n      };\n      const json = JSON.stringify(payload, null, 2);\n      const fileName = 'FinTrack_Full_Backup_' + new Date().toISOString().slice(0, 10) + '.json';\n      const result = await window.FinTrackNativeExport.saveFile(json, fileName, 'application/json');\n      if (result.saved) showToast('Backup JSON tersimpan di lokasi yang dipilih. Simpan lokasi file untuk pemulihan nanti.', 'success');\n      else if (result.cancelled) showToast('Penyimpanan backup dibatalkan. File belum disimpan.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] JSON backup gagal:', error);\n      showToast('Backup JSON gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n})();\n</script>";
           if (!html.includes('function exportTransactionsToCSV()') || !html.includes('function backupTransactionsJSON()')) {
             throw new Error('Fungsi ekspor yang diharapkan tidak ditemukan; APK build dihentikan agar patch tidak diterapkan ke kode yang berbeda.');
           }
@@ -161,6 +146,91 @@ jobs:
           node -e "require('sharp')('icon-512.png').resize(1024, 1024).png().toFile('assets/icon.png').then(() => console.log('Sumber ikon Android dibuat dari icon-512.png'))"
           npx cap init "Fiq-FinTrack" "com.fiq.fintrack" --web-dir www
           npx cap add android
+
+          # Android Storage Access Framework: save exports to a user-selected document location.
+          mkdir -p android/app/src/main/java/com/fiq/fintrack
+          cat > android/app/src/main/java/com/fiq/fintrack/FinTrackFilePlugin.java <<'EOF'
+          package com.fiq.fintrack;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.net.Uri;
+
+          import com.getcapacitor.ActivityResult;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.ActivityCallback;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+
+          @CapacitorPlugin(name = "FinTrackFile")
+          public class FinTrackFilePlugin extends Plugin {
+            @PluginMethod
+            public void saveFile(PluginCall call) {
+              String fileName = call.getString("fileName");
+              String mimeType = call.getString("mimeType");
+              String fileContent = call.getString("content");
+              if (fileName == null || fileName.trim().isEmpty() || fileContent == null) {
+                call.reject("Nama file atau isi file tidak tersedia.");
+                return;
+              }
+              if (mimeType == null || mimeType.trim().isEmpty()) mimeType = "application/octet-stream";
+
+              Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+              intent.addCategory(Intent.CATEGORY_OPENABLE);
+              intent.setType(mimeType);
+              intent.putExtra(Intent.EXTRA_TITLE, fileName);
+              startActivityForResult(call, intent, "handleSaveResult");
+            }
+
+            @ActivityCallback
+            private void handleSaveResult(PluginCall call, ActivityResult result) {
+              if (call == null) return;
+              if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null ||
+                  result.getData().getData() == null) {
+                JSObject cancelled = new JSObject();
+                cancelled.put("saved", false);
+                cancelled.put("cancelled", true);
+                call.resolve(cancelled);
+                return;
+              }
+
+              Uri uri = result.getData().getData();
+              String fileContent = call.getString("content");
+              try (OutputStream output = getContext().getContentResolver().openOutputStream(uri, "w")) {
+                if (output == null) throw new IllegalStateException("Android tidak dapat membuka file tujuan.");
+                output.write(fileContent.getBytes(StandardCharsets.UTF_8));
+                output.flush();
+                JSObject saved = new JSObject();
+                saved.put("saved", true);
+                saved.put("uri", uri.toString());
+                call.resolve(saved);
+              } catch (Exception error) {
+                call.reject("Gagal menyimpan file ke lokasi yang dipilih.", error);
+              }
+            }
+          }
+          EOF
+
+          cat > android/app/src/main/java/com/fiq/fintrack/MainActivity.java <<'EOF'
+          package com.fiq.fintrack;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              registerPlugin(FinTrackFilePlugin.class);
+              super.onCreate(savedInstanceState);
+            }
+          }
+          EOF
+
           npx cap sync android
           npx capacitor-assets generate --android --iconBackgroundColor '#4f46e5' --splashBackgroundColor '#f8fafc'
           echo "configurations.all { exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7' }" >> android/app/build.gradle
