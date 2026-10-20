@@ -920,7 +920,7 @@
         <button onclick="closePinSettingModal()" class="text-slate-400 hover:text-slate-600 text-lg">&times;</button>
       </div>
       <div class="space-y-3">
-        <p class="text-xs text-slate-500 dark:text-slate-400">PIN 4 digit mengunci layar saat aplikasi dibuka agar data keuangan Anda tetap rahasia.</p>
+        <p class="text-xs text-slate-500 dark:text-slate-400">PIN 4 digit membantu mencegah akses kasual ke layar aplikasi pada perangkat ini. PIN tidak mengenkripsi data dan bukan pengganti keamanan perangkat.</p>
         <div>
           <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Ketik 4 Digit PIN Baru</label>
           <input type="password" id="input-new-pin" maxlength="4" placeholder="Contoh: 1234" class="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white text-center text-lg font-mono font-bold tracking-widest">
@@ -2021,6 +2021,57 @@
             req.onerror = () => reject(req.error);
           } catch (e) {
             reject(e);
+          }
+        });
+      },
+
+      // Ganti beberapa store dalam satu transaksi IndexedDB agar restore tidak setengah jalan.
+      // Mode fallback melakukan rollback best-effort terhadap nilai localStorage sebelumnya.
+      async replaceStoresAtomically(replacements) {
+        const entries = Object.entries(replacements || {});
+        if (!entries.length) return;
+
+        if (this.isFallback || !this.db) {
+          const snapshots = new Map();
+          try {
+            for (const [storeName] of entries) {
+              const key = this._fallbackStorageKey(storeName);
+              snapshots.set(key, localStorage.getItem(key));
+            }
+            for (const [storeName, items] of entries) {
+              const key = this._fallbackStorageKey(storeName);
+              localStorage.setItem(key, JSON.stringify(items || []));
+            }
+          } catch (error) {
+            for (const [key, previousValue] of snapshots.entries()) {
+              try {
+                if (previousValue === null) localStorage.removeItem(key);
+                else localStorage.setItem(key, previousValue);
+              } catch (rollbackError) {
+                console.error('[DAL] Rollback fallback restore gagal:', rollbackError);
+              }
+            }
+            throw error;
+          }
+          return;
+        }
+
+        return new Promise((resolve, reject) => {
+          let tx;
+          try {
+            const storeNames = entries.map(([name]) => name);
+            tx = this.db.transaction(storeNames, 'readwrite');
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Transaksi pemulihan gagal.'));
+            tx.onabort = () => reject(tx.error || new Error('Transaksi pemulihan dibatalkan.'));
+            for (const [storeName, items] of entries) {
+              const store = tx.objectStore(storeName);
+              store.clear();
+              (items || []).forEach(item => store.put(item));
+            }
+          } catch (error) {
+            try { if (tx) tx.abort(); } catch (_) {}
+            reject(error);
           }
         });
       },
@@ -7197,8 +7248,9 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
       a.href = url;
       a.download = `FinTrack_Export_${new Date().toISOString().slice(0,10)}.csv`;
       a.click();
-      URL.revokeObjectURL(url);
-      showToast('Data berhasil diekspor ke CSV!', 'success');
+      // Browser download is requested, but the page cannot verify that the file was saved.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('Permintaan unduh CSV dikirim ke browser. Periksa folder unduhan; penyimpanan file tidak dapat diverifikasi aplikasi.', 'info');
     }
 
     function backupTransactionsJSON() {
@@ -7224,8 +7276,9 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
       a.href = url;
       a.download = `FinTrack_Full_Backup_${new Date().toISOString().slice(0,10)}.json`;
       a.click();
-      URL.revokeObjectURL(url);
-      showToast('Seluruh data berhasil dicadangkan!', 'success');
+      // Browser download is requested, but the page cannot verify that the file was saved.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('Permintaan unduh backup JSON dikirim ke browser. Periksa folder unduhan; penyimpanan file tidak dapat diverifikasi aplikasi.', 'info');
     }
 
     document.getElementById('input-restore-file').addEventListener('change', (e) => {
@@ -7233,6 +7286,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
       if (!file) return;
       const reader = new FileReader();
       reader.onload = async (evt) => {
+        let restoreStateSnapshot = null;
         try {
           const parsed = JSON.parse(evt.target.result);
           let newTx = [];
@@ -7261,8 +7315,119 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
             throw new Error('Format berkas tidak sesuai.');
           }
 
+          // Validasi seluruh struktur backup sebelum ada perubahan ke IndexedDB.
+          // Ini mencegah file rusak/berformat salah menghapus sebagian data aktif.
+          const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+          const validateFiniteValue = (value, label) => {
+            if (value !== undefined && value !== null && value !== '' && !Number.isFinite(Number(value))) {
+              throw new Error(`Nilai ${label} tidak valid dalam file backup.`);
+            }
+          };
+
+          if (!Array.isArray(newTx)) throw new Error('Daftar transaksi dalam backup tidak valid.');
+          if (!Array.isArray(newWallets)) throw new Error('Daftar dompet dalam backup tidak valid.');
+          if (!newCategories || !Array.isArray(newCategories.expense) || !Array.isArray(newCategories.income)) {
+            throw new Error('Struktur kategori dalam backup tidak valid.');
+          }
+          if (!isPlainObject(newStartingBalances)) throw new Error('Data saldo awal dalam backup tidak valid.');
+          if (!isPlainObject(newBudgets)) throw new Error('Data anggaran dalam backup tidak valid.');
+          if (!Array.isArray(newDebts) || !Array.isArray(newGoals) || !Array.isArray(newPresets)) {
+            throw new Error('Daftar utang, target, atau preset dalam backup tidak valid.');
+          }
+
+          newWallets.forEach((wallet, index) => {
+            if (typeof wallet === 'string') return;
+            if (!wallet || typeof wallet !== 'object' || Array.isArray(wallet)) {
+              throw new Error(`Format dompet ke-${index + 1} tidak valid.`);
+            }
+            const name = wallet.name ?? wallet.wallet;
+            if (name !== undefined && typeof name !== 'string') {
+              throw new Error(`Nama dompet ke-${index + 1} tidak valid.`);
+            }
+          });
+
+          for (const type of ['expense', 'income']) {
+            newCategories[type].forEach((category, index) => {
+              if (typeof category !== 'string') {
+                throw new Error(`Kategori ${type} ke-${index + 1} tidak valid.`);
+              }
+            });
+          }
+
+          Object.entries(newStartingBalances).forEach(([wallet, amount]) => {
+            validateFiniteValue(amount, `saldo awal untuk dompet "${wallet}"`);
+          });
+          Object.entries(newBudgets).forEach(([category, amount]) => {
+            validateFiniteValue(amount, `anggaran untuk kategori "${category}"`);
+          });
+
+          newTx.forEach((tx, index) => {
+            if (!tx || typeof tx !== 'object' || Array.isArray(tx)) {
+              throw new Error(`Transaksi ke-${index + 1} tidak valid.`);
+            }
+            if (tx.name !== undefined && tx.name !== null && typeof tx.name !== 'string') {
+              throw new Error(`Nama transaksi ke-${index + 1} tidak valid.`);
+            }
+            if (tx.date && Number.isNaN(new Date(tx.date).getTime())) {
+              throw new Error(`Tanggal transaksi ke-${index + 1} tidak valid.`);
+            }
+            if (tx.type && !['income', 'expense', 'transfer'].includes(tx.type)) {
+              throw new Error(`Jenis transaksi ke-${index + 1} tidak dikenal.`);
+            }
+            validateFiniteValue(tx.amount, `jumlah transaksi ke-${index + 1}`);
+          });
+
+          newDebts.forEach((debt, index) => {
+            if (!debt || typeof debt !== 'object' || Array.isArray(debt)) {
+              throw new Error(`Data utang ke-${index + 1} tidak valid.`);
+            }
+            if (debt.person != null && typeof debt.person !== 'string') {
+              throw new Error(`Nama pihak pada utang ke-${index + 1} tidak valid.`);
+            }
+            if (debt.notes != null && typeof debt.notes !== 'string') {
+              throw new Error(`Catatan utang ke-${index + 1} tidak valid.`);
+            }
+            validateFiniteValue(debt.amount, `jumlah utang ke-${index + 1}`);
+          });
+
+          newGoals.forEach((goal, index) => {
+            if (!goal || typeof goal !== 'object' || Array.isArray(goal)) {
+              throw new Error(`Data target ke-${index + 1} tidak valid.`);
+            }
+            if (goal.title != null && typeof goal.title !== 'string') {
+              throw new Error(`Nama target ke-${index + 1} tidak valid.`);
+            }
+            validateFiniteValue(goal.targetAmount, `target ke-${index + 1}`);
+            validateFiniteValue(goal.currentAmount, `progres target ke-${index + 1}`);
+          });
+
+          newPresets.forEach((preset, index) => {
+            if (!preset || typeof preset !== 'object' || Array.isArray(preset)) {
+              throw new Error(`Preset ke-${index + 1} tidak valid.`);
+            }
+            if (preset.name != null && typeof preset.name !== 'string') {
+              throw new Error(`Nama preset ke-${index + 1} tidak valid.`);
+            }
+            if (preset.category != null && typeof preset.category !== 'string') {
+              throw new Error(`Kategori preset ke-${index + 1} tidak valid.`);
+            }
+            validateFiniteValue(preset.amount, `jumlah preset ke-${index + 1}`);
+          });
+
+          const confirmed = window.confirm(
+            'Pemulihan backup akan MENGGANTI data lokal FinTrack saat ini (transaksi, dompet, kategori, saldo awal, anggaran, utang, target, dan preset). Pastikan file backup benar. Lanjutkan?'
+          );
+          if (!confirmed) {
+            showToast('Pemulihan backup dibatalkan. Data lokal tidak diubah.', 'info');
+            return;
+          }
+
+          restoreStateSnapshot = {
+            transactions, customWallets, customCategories, startingBalances, budgets, debts, goals, presets
+          };
           const deviceId = getDeviceId();
           const nowIso = new Date().toISOString();
+          const replacementStores = {};
 
           // 1. Wallets
           let cleanWallets = [];
@@ -7289,8 +7454,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
               deviceId: deviceId
             };
           });
-          await DAL.clear('wallets');
-          await DAL.putBatch('wallets', walletEntities);
+          replacementStores.wallets = walletEntities;
 
           const walletMap = new Map();
           walletEntities.forEach(w => walletMap.set(w.name, w.id));
@@ -7308,8 +7472,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
             const id = generateUUID();
             catEntities.push({ id: id, categoryId: id, name: c, type: 'income', createdAt: nowIso, updatedAt: nowIso, deletedAt: null, deviceId: deviceId });
           });
-          await DAL.clear('categories');
-          await DAL.putBatch('categories', catEntities);
+          replacementStores.categories = catEntities;
 
           const catMap = new Map();
           catEntities.forEach(c => catMap.set(`${c.type}_${c.name}`, c.id));
@@ -7328,8 +7491,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
             deletedAt: null,
             deviceId: deviceId
           }));
-          await DAL.clear('startingBalances');
-          await DAL.putBatch('startingBalances', sbEntities);
+          replacementStores.startingBalances = sbEntities;
 
           // 4. Budgets
           if (newBudgets && typeof newBudgets === 'object') {
@@ -7345,8 +7507,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
             deletedAt: null,
             deviceId: deviceId
           }));
-          await DAL.clear('budgets');
-          await DAL.putBatch('budgets', budgetEntities);
+          replacementStores.budgets = budgetEntities;
 
           // 5. Debts
           if (Array.isArray(newDebts)) {
@@ -7364,8 +7525,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
               deletedAt: null,
               deviceId: deviceId
             }));
-            await DAL.clear('debts');
-            await DAL.putBatch('debts', debts);
+            replacementStores.debts = debts;
           }
 
           // 6. Goals
@@ -7382,8 +7542,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
               deletedAt: null,
               deviceId: deviceId
             }));
-            await DAL.clear('goals');
-            await DAL.putBatch('goals', goals);
+            replacementStores.goals = goals;
           }
 
           // 7. Presets
@@ -7400,8 +7559,7 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
               deletedAt: null,
               deviceId: deviceId
             }));
-            await DAL.clear('presets');
-            await DAL.putBatch('presets', presets);
+            replacementStores.presets = presets;
           }
 
           // 8. Transactions
@@ -7433,16 +7591,30 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
             };
           });
 
-          await DAL.clear('transactions');
-          await DAL.putBatch('transactions', transactions);
+          replacementStores.transactions = transactions;
+          // Restore mengganti data lokal, tetapi tidak mengirimkannya ke cloud.
+          // Antrean lama dibuang agar perubahan pra-restore tidak terkirim kemudian.
+          replacementStores.changeQueue = [];
+          await DAL.replaceStoresAtomically(replacementStores);
 
           await refreshRelationCaches();
           populateDropdowns();
           populateMonthFilter();
           renderApp();
-          showToast('Data berhasil dipulihkan secara lengkap ke IndexedDB!', 'success');
+          showToast('Data berhasil dipulihkan ke penyimpanan lokal FinTrack.', 'success');
         } catch (err) {
-          showToast(`Gagal memulihkan: ${err.message}`, 'danger');
+          if (restoreStateSnapshot) {
+            ({ transactions, customWallets, customCategories, startingBalances, budgets, debts, goals, presets } = restoreStateSnapshot);
+            try {
+              await refreshRelationCaches();
+              populateDropdowns();
+              populateMonthFilter();
+              renderApp();
+            } catch (refreshError) {
+              console.error('[Restore] Gagal memulihkan tampilan setelah restore gagal:', refreshError);
+            }
+          }
+          showToast(`Gagal memulihkan: ${err.message}. Data aktif dipertahankan jika penyimpanan mendukung rollback transaksi.`, 'danger');
         } finally {
           e.target.value = '';
         }
