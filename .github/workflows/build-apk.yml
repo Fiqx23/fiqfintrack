@@ -3,9 +3,14 @@ name: Build Fiq-FinTrack APK
 on:
   workflow_dispatch:
 
+# Build only reads repository contents; no write permissions or secrets are needed.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Source Code
@@ -104,7 +109,7 @@ jobs:
             '  <script src="./vendor/chart.umd.js"></script>',
             '  <!-- Supabase JS bundled locally for offline SDK initialization -->',
             '  <script src="./vendor/supabase.js"></script>',
-            '  <!-- APK-only native JSON/CSV export bridge -->',
+            '  <!-- APK-only native JSON backup bridge -->',
             '  <script src="./vendor/apk-native-export.js"></script>',
             '',
           ].join('\n');
@@ -116,8 +121,8 @@ jobs:
           html = html.replace('  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n', '');
           html = html.replace('  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">\n', '');
 
-          const nativeExportPatch = "<!-- APK_NATIVE_EXPORT_PATCH -->\n<script>\n(() => {\n  const isNativeAndroid = () => Boolean(window.Capacitor && typeof window.Capacitor.getPlatform === 'function' && window.Capacitor.getPlatform() === 'android');\n  const originalCsvExport = window.exportTransactionsToCSV;\n  const originalJsonBackup = window.backupTransactionsJSON;\n\n  window.exportTransactionsToCSV = async function() {\n    if (!isNativeAndroid()) return originalCsvExport.apply(this, arguments);\n    try {\n      if (!Array.isArray(transactions) || transactions.length === 0) {\n        showToast('Belum ada transaksi untuk diekspor!', 'warning');\n        return;\n      }\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const data = getTimeFilteredTransactions().filter(t => !t.deletedAt);\n      const headers = ['ID', 'Tanggal', 'Jenis', 'Kategori', 'Sumber/Tujuan Dompet', 'Nama', 'Nominal'];\n      const rows = data.map(t => [\n        t.id,\n        formatDate(t.date),\n        t.type,\n        t.category || '-',\n        t.type === 'transfer' ? String(t.walletFrom || '') + ' -> ' + String(t.walletTo || '') : (t.wallet || 'Tunai (cash)'),\n        '\"' + (t.name || '').replace(/\"/g, '\"\"') + '\"',\n        t.amount\n      ].join(';'));\n      const csv = '\\uFEFF' + [headers.join(';'), ...rows].join('\\r\\n');\n      const fileName = 'FinTrack_Export_' + new Date().toISOString().slice(0, 10) + '.csv';\n      const result = await window.FinTrackNativeExport.saveFile(csv, fileName, 'text/csv');\n      if (result.saved) showToast('CSV tersimpan di lokasi yang dipilih.', 'success');\n      else if (result.cancelled) showToast('Penyimpanan CSV dibatalkan. File belum disimpan.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] CSV gagal:', error);\n      showToast('Ekspor CSV gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n\n  window.backupTransactionsJSON = async function() {\n    if (!isNativeAndroid()) return originalJsonBackup.apply(this, arguments);\n    try {\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const payload = {\n        app: 'Fiq-FinTrack Pro',\n        version: '3.2',\n        schemaVersion: 2,\n        deviceId: getDeviceId(),\n        exportedAt: new Date().toISOString(),\n        transactions: transactions,\n        wallets: customWallets,\n        categories: customCategories,\n        startingBalances: startingBalances,\n        budgets: budgets,\n        debts: debts,\n        goals: goals,\n        presets: presets\n      };\n      const json = JSON.stringify(payload, null, 2);\n      const fileName = 'FinTrack_Full_Backup_' + new Date().toISOString().slice(0, 10) + '.json';\n      const result = await window.FinTrackNativeExport.saveFile(json, fileName, 'application/json');\n      if (result.saved) showToast('Backup JSON tersimpan di lokasi yang dipilih. Simpan lokasi file untuk pemulihan nanti.', 'success');\n      else if (result.cancelled) showToast('Penyimpanan backup dibatalkan. File belum disimpan.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] JSON backup gagal:', error);\n      showToast('Backup JSON gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n})();\n</script>";
-          if (!html.includes('function exportTransactionsToCSV()') || !html.includes('function backupTransactionsJSON()')) {
+          const nativeExportPatch = "<!-- APK_NATIVE_EXPORT_PATCH -->\n<script>\n(() => {\n  const isNativeAndroid = () => Boolean(window.Capacitor && typeof window.Capacitor.getPlatform === 'function' && window.Capacitor.getPlatform() === 'android');\n  const originalCsvExport = window.exportTransactionsToCSV;\n  const originalJsonBackup = window.backupTransactionsJSON;\n\n  window.backupTransactionsJSON = async function() {\n    if (!isNativeAndroid()) return originalJsonBackup.apply(this, arguments);\n    try {\n      if (!window.FinTrackNativeExport) throw new Error('Modul ekspor native tidak tersedia.');\n      const payload = {\n        app: 'Fiq-FinTrack Pro',\n        version: '3.2',\n        schemaVersion: 2,\n        deviceId: getDeviceId(),\n        exportedAt: new Date().toISOString(),\n        transactions: transactions,\n        wallets: customWallets,\n        categories: customCategories,\n        startingBalances: startingBalances,\n        budgets: budgets,\n        debts: debts,\n        goals: goals,\n        presets: presets\n      };\n      const json = JSON.stringify(payload, null, 2);\n      const fileName = 'FinTrack_Full_Backup_' + new Date().toISOString().slice(0, 10) + '.json';\n      const result = await window.FinTrackNativeExport.saveFile(json, fileName, 'application/json');\n      if (result.saved) showToast('Backup JSON tersimpan di lokasi yang dipilih. Simpan lokasi file untuk pemulihan nanti.', 'success');\n      else if (result.cancelled) showToast('Penyimpanan backup dibatalkan. File belum disimpan.', 'warning');\n    } catch (error) {\n      console.error('[FinTrack Export] JSON backup gagal:', error);\n      showToast('Backup JSON gagal. Coba lagi dan periksa penyimpanan perangkat.', 'danger');\n    }\n  };\n})();\n</script>";
+          if (!html.includes('function backupTransactionsJSON()')) {
             throw new Error('Fungsi ekspor yang diharapkan tidak ditemukan; APK build dihentikan agar patch tidak diterapkan ke kode yang berbeda.');
           }
           if (html.includes('<!-- APK_NATIVE_EXPORT_PATCH -->')) {
@@ -250,5 +255,7 @@ jobs:
       - name: Unggah Hasil APK ke GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Fiq-FinTrack-Release
+          name: Fiq-FinTrack-Debug-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
