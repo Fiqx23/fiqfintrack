@@ -2802,6 +2802,22 @@
           await DAL.put('wallets', w);
         }
 
+        // Idempotent dependency sync: resolve existing cloud rows before attempting insert.
+        const { data: byId, error: lookupByIdError } = await client
+          .from(this.TABLE_WALLETS)
+          .select('id, name')
+          .eq('user_id', userId)
+          .eq('id', w.id)
+          .maybeSingle();
+
+        if (lookupByIdError) {
+          return { success: false, error: lookupByIdError.message, code: lookupByIdError.code };
+        }
+        if (byId && byId.id) {
+          await this.markEntityQueueSynced('wallets', w.id);
+          return { success: true, id: byId.id };
+        }
+
         const walletPayload = {
           id: w.id,
           user_id: userId,
@@ -2812,38 +2828,30 @@
           device_id: w.deviceId || deviceId
         };
 
-        console.log('[SYNC DEBUG] [Dependency 2/2] Pushing wallet:', walletPayload.name, walletPayload.id);
-        const { data, error } = await client
-          .from(this.TABLE_WALLETS)
-          .insert(walletPayload);
-
+        const { error } = await client.from(this.TABLE_WALLETS).insert(walletPayload);
         if (error) {
-          const isDuplicate = (error.code === '23505') || (error.message && error.message.toLowerCase().includes('duplicate key'));
+          const isDuplicate = error.code === '23505' || (error.message || '').toLowerCase().includes('duplicate key');
           if (isDuplicate) {
-            console.log('[SYNC DEBUG] [Dependency 2/2] Wallet already in cloud (idempotent):', w.name, w.id);
-            if (error.message && error.message.includes('wallets_user_name_active_idx')) {
-              try {
-                const { data: existing } = await client
-                  .from(this.TABLE_WALLETS)
-                  .select('id')
-                  .eq('user_id', userId)
-                  .eq('name', walletPayload.name)
-                  .is('deleted_at', null)
-                  .maybeSingle();
-                if (existing && existing.id) {
-                  await this.markEntityQueueSynced('wallets', w.id);
-                  return { success: true, id: existing.id };
-                }
-              } catch (lookupErr) {}
+            // The unique active-name constraint may map this local wallet to a different cloud ID.
+            const { data: existingByName, error: nameLookupError } = await client
+              .from(this.TABLE_WALLETS)
+              .select('id')
+              .eq('user_id', userId)
+              .eq('name', walletPayload.name)
+              .is('deleted_at', null)
+              .maybeSingle();
+
+            if (!nameLookupError && existingByName && existingByName.id) {
+              await this.markEntityQueueSynced('wallets', w.id);
+              return { success: true, id: existingByName.id };
             }
-            await this.markEntityQueueSynced('wallets', w.id);
-            return { success: true, id: w.id };
+
+            // Do not claim success for an unresolved primary-key collision.
+            return { success: false, error: error.message, code: error.code };
           }
-          console.error('[SYNC DEBUG] [Dependency 2/2] Gagal push wallet:', error);
           return { success: false, error: error.message, code: error.code };
         }
 
-        console.log('[SYNC DEBUG] [Dependency 2/2] Wallet successfully synced:', w.name, w.id);
         await this.markEntityQueueSynced('wallets', w.id);
         return { success: true, id: w.id };
       },
@@ -3939,69 +3947,21 @@
               device_id: sb.deviceId || getDeviceId()
             };
 
-            if (event.operation === 'update') {
-              const { data, error } = await client.from(table)
-                .update({
-                  wallet_id: payload.wallet_id,
-                  amount: payload.amount,
-                  updated_at: payload.updated_at,
-                  deleted_at: payload.deleted_at,
-                  device_id: payload.device_id
-                })
-                .eq('id', sb.id)
-                .eq('user_id', currentUser.id)
-                .select('id');
+            // Use an idempotent upsert so create/update events converge on one cloud record.
+            const { data: savedRows, error: saveError } = await client
+              .from(table)
+              .upsert(payload, { onConflict: 'id' })
+              .select('id, user_id, wallet_id, amount')
+              .limit(1);
 
-              if (error) throw error;
-              if (!data || data.length === 0) {
-                const { error: insertError } = await client.from(table).insert(payload);
-                if (insertError) {
-                  const isDuplicate = insertError.code === '23505' || (insertError.message || '').toLowerCase().includes('duplicate key');
-                  if (!isDuplicate) throw insertError;
-                  const { data: existing, error: lookupError } = await client.from(table)
-                    .select('id')
-                    .eq('id', sb.id)
-                    .eq('user_id', currentUser.id)
-                    .maybeSingle();
-                  if (lookupError || !existing) throw insertError;
-                  const { error: updateError } = await client.from(table)
-                    .update({
-                      wallet_id: payload.wallet_id,
-                      amount: payload.amount,
-                      updated_at: payload.updated_at,
-                      deleted_at: payload.deleted_at,
-                      device_id: payload.device_id
-                    })
-                    .eq('id', sb.id)
-                    .eq('user_id', currentUser.id);
-                  if (updateError) throw updateError;
-                }
-              }
-            } else {
-              const { error } = await client.from(table).insert(payload);
-              if (error) {
-                const isDuplicate = error.code === '23505' || (error.message || '').toLowerCase().includes('duplicate key');
-                if (!isDuplicate) throw error;
-
-                const { data: existing, error: lookupError } = await client.from(table)
-                  .select('id')
-                  .eq('id', sb.id)
-                  .eq('user_id', currentUser.id)
-                  .maybeSingle();
-                if (lookupError || !existing) throw error;
-
-                const { error: updateError } = await client.from(table)
-                  .update({
-                    wallet_id: payload.wallet_id,
-                    amount: payload.amount,
-                    updated_at: payload.updated_at,
-                    deleted_at: payload.deleted_at,
-                    device_id: payload.device_id
-                  })
-                  .eq('id', sb.id)
-                  .eq('user_id', currentUser.id);
-                if (updateError) throw updateError;
-              }
+            if (saveError) throw saveError;
+            const saved = savedRows && savedRows[0];
+            if (!saved ||
+                saved.id !== payload.id ||
+                saved.user_id !== currentUser.id ||
+                saved.wallet_id !== payload.wallet_id ||
+                Number(saved.amount) !== payload.amount) {
+              throw new Error('Verifikasi saldo awal gagal: nilai yang tersimpan di cloud tidak sesuai.');
             }
 
             await ChangeTracker.markSynced(event.id);
@@ -6041,19 +6001,28 @@ async pushPendingAll() {
     async function editStartingBalance(walletName) {
       const cur = startingBalances[walletName] || 0;
       const val = prompt(`Masukkan Saldo Awal untuk ${walletName}:`, cur);
-      if (val !== null) {
-        const num = parseFloat(val.replace(/\D/g, '')) || 0;
-        startingBalances[walletName] = num;
+      if (val === null) return;
 
+      const cleaned = String(val).replace(/[^0-9]/g, '');
+      const num = cleaned === '' ? 0 : Number(cleaned);
+      if (!Number.isSafeInteger(num) || num < 0) {
+        showToast('Saldo awal tidak valid. Masukkan angka rupiah yang benar.', 'warning');
+        return;
+      }
+
+      try {
         const allSb = await DAL.getAll('startingBalances');
-        let sbRecord = allSb.find(s => s.walletName === walletName && !s.deletedAt);
+        let sbRecord = (allSb || []).find(item =>
+          !item.deletedAt &&
+          (item.walletId === getWalletIdByName(walletName) || item.walletName === walletName)
+        );
         const nowIso = new Date().toISOString();
         const isNew = !sbRecord;
 
         if (isNew) {
           sbRecord = {
             id: generateUUID(),
-            walletName: walletName,
+            walletName,
             walletId: getWalletIdByName(walletName),
             amount: num,
             createdAt: nowIso,
@@ -6068,10 +6037,24 @@ async pushPendingAll() {
         }
 
         await DAL.put('startingBalances', sbRecord);
-        await ChangeTracker.record('startingBalances', sbRecord.id, isNew ? 'create' : 'update');
+        const savedLocal = await DAL.get('startingBalances', sbRecord.id);
+        if (!savedLocal || Number(savedLocal.amount) !== num) {
+          throw new Error('Saldo awal gagal diverifikasi di penyimpanan lokal.');
+        }
 
+        await ChangeTracker.record('startingBalances', sbRecord.id, isNew ? 'create' : 'update');
+        const queued = (await ChangeTracker.getPending('startingBalances') || [])
+          .some(item => String(item.entityId) === String(sbRecord.id));
+        if (!queued) {
+          throw new Error('Saldo tersimpan lokal, tetapi antrean sinkronisasi gagal dicatat.');
+        }
+
+        startingBalances[walletName] = num;
         renderWalletCards();
-        showToast(`Saldo awal ${walletName} diperbarui!`, 'success');
+        showToast('Saldo awal tersimpan lokal dan masuk antrean sinkronisasi.', 'success');
+      } catch (err) {
+        console.error('[Starting Balance] Gagal menyimpan saldo awal:', err);
+        showToast(`Saldo awal gagal diproses: ${err.message || String(err)}`, 'danger');
       }
     }
 
