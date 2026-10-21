@@ -5337,9 +5337,21 @@ async pushPendingAll() {
 
       const catRecords = (await DAL.getAll('categories')).filter(c => !c.deletedAt);
       if (catRecords && catRecords.length > 0) {
+        const uniqueCategoryNames = items => {
+          const seen = new Set();
+          return items.reduce((result, item) => {
+            const name = typeof item === 'string' ? item.trim() : '';
+            const key = name.toLocaleLowerCase('id-ID');
+            if (name && !seen.has(key)) {
+              seen.add(key);
+              result.push(name);
+            }
+            return result;
+          }, []);
+        };
         customCategories = {
-          expense: catRecords.filter(c => c.type === 'expense').map(c => c.name),
-          income: catRecords.filter(c => c.type === 'income').map(c => c.name)
+          expense: uniqueCategoryNames(catRecords.filter(c => c.type === 'expense').map(c => c.name)),
+          income: uniqueCategoryNames(catRecords.filter(c => c.type === 'income').map(c => c.name))
         };
         if (customCategories.expense.length === 0) customCategories.expense = [...DEFAULT_CATEGORIES.expense];
         if (customCategories.income.length === 0) customCategories.income = [...DEFAULT_CATEGORIES.income];
@@ -7351,6 +7363,17 @@ _Dihitung otomatis via Fiq-FinTrack Pro_`;
                 throw new Error(`Kategori ${type} ke-${index + 1} tidak valid.`);
               }
             });
+            // Normalize duplicates from backup before creating local records.
+            const seenCategoryNames = new Set();
+            newCategories[type] = newCategories[type].reduce((result, category) => {
+              const name = category.trim();
+              const key = name.toLocaleLowerCase('id-ID');
+              if (name && !seenCategoryNames.has(key)) {
+                seenCategoryNames.add(key);
+                result.push(name);
+              }
+              return result;
+            }, []);
           }
 
           Object.entries(newStartingBalances).forEach(([wallet, amount]) => {
